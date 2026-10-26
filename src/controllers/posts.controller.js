@@ -1,12 +1,6 @@
 const postsService = require("../services/posts.service");
+const { parsePagination, buildMeta } = require("../utils/pagination");
 const { Prisma } = require("@prisma/client");
-
-function isValidPositiveInteger(val) {
-  if (typeof val !== "string") return false;
-  if (!/^\d+$/.test(val)) return false;
-  const num = parseInt(val, 10);
-  return num > 0;
-}
 
 function isValidDate(str) {
   if (typeof str !== "string") return false;
@@ -15,24 +9,41 @@ function isValidDate(str) {
 }
 
 async function create(req, res) {
-  const { imageUrl, caption, location } = req.body;
-  if (!imageUrl) {
-    return res.status(400).json({ error: "imageUrl is required" });
+  const { imageUrl, authorId, caption, location } = req.body;
+  if (!imageUrl || authorId === undefined || authorId === null || authorId === "") {
+    return res.status(400).json({ error: "imageUrl and authorId are required" });
+  }
+
+  const parsedAuthorId = parseInt(authorId, 10);
+  if (isNaN(parsedAuthorId)) {
+    return res.status(404).json({ error: "User not found" });
   }
 
   try {
-    const post = await postsService.createPost({ imageUrl, caption, location });
+    const post = await postsService.createPost({
+      imageUrl,
+      authorId: parsedAuthorId,
+      caption,
+      location,
+    });
     return res.status(201).json(post);
   } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2003") {
+      return res.status(404).json({ error: "User not found" });
+    }
     console.error(err);
     return res.status(500).json({ error: "Internal server error" });
   }
 }
 
 async function list(req, res) {
+  const pagination = parsePagination(req.query);
+  if (pagination.error) {
+    return res.status(400).json({ error: pagination.error });
+  }
+
+  const { page, limit, skip } = pagination;
   const {
-    page: rawPage,
-    limit: rawLimit,
     sortBy = "createdAt",
     order = "desc",
     location,
@@ -41,23 +52,10 @@ async function list(req, res) {
     to,
   } = req.query;
 
-  // Validation: page & limit
-  if (rawPage !== undefined && !isValidPositiveInteger(rawPage)) {
-    return res.status(400).json({ error: "page and limit must be positive integers" });
-  }
-  if (rawLimit !== undefined && !isValidPositiveInteger(rawLimit)) {
-    return res.status(400).json({ error: "page and limit must be positive integers" });
-  }
-
-  const page = rawPage !== undefined ? parseInt(rawPage, 10) : 1;
-  const requestedLimit = rawLimit !== undefined ? parseInt(rawLimit, 10) : 10;
-  const limit = Math.min(requestedLimit, 50);
-  const skip = (page - 1) * limit;
-
   // Validation: sortBy
-  const allowedSortBy = ["createdAt", "updatedAt"];
+  const allowedSortBy = ["createdAt", "updatedAt", "likes"];
   if (!allowedSortBy.includes(sortBy)) {
-    return res.status(400).json({ error: "sortBy must be one of: createdAt, updatedAt" });
+    return res.status(400).json({ error: "sortBy must be one of: createdAt, updatedAt, likes" });
   }
 
   // Validation: order
@@ -91,7 +89,15 @@ async function list(req, res) {
     }
   }
 
-  const orderBy = { [sortBy]: order };
+  let orderBy;
+  if (sortBy === "likes") {
+    orderBy = [
+      { likes: { _count: order } },
+      { createdAt: "desc" },
+    ];
+  } else {
+    orderBy = { [sortBy]: order };
+  }
 
   try {
     const { data, total } = await postsService.listPosts({
@@ -101,16 +107,9 @@ async function list(req, res) {
       where,
     });
 
-    const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
-
     return res.status(200).json({
       data,
-      meta: {
-        page,
-        limit,
-        total,
-        totalPages,
-      },
+      meta: buildMeta(page, limit, total),
     });
   } catch (err) {
     console.error(err);

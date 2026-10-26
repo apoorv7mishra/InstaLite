@@ -1,12 +1,6 @@
 const usersService = require("../services/users.service");
+const { parsePagination, buildMeta } = require("../utils/pagination");
 const { Prisma } = require("@prisma/client");
-
-function isValidPositiveInteger(val) {
-  if (typeof val !== "string") return false;
-  if (!/^\d+$/.test(val)) return false;
-  const num = parseInt(val, 10);
-  return num > 0;
-}
 
 async function create(req, res) {
   const { username, email, fullname, bio } = req.body;
@@ -27,20 +21,19 @@ async function create(req, res) {
 }
 
 async function list(req, res) {
-  const { page: rawPage, limit: rawLimit, sortBy = "createdAt", order = "desc", isPrivate: rawIsPrivate, search } = req.query;
-
-  // Validation: page & limit
-  if (rawPage !== undefined && !isValidPositiveInteger(rawPage)) {
-    return res.status(400).json({ error: "page and limit must be positive integers" });
-  }
-  if (rawLimit !== undefined && !isValidPositiveInteger(rawLimit)) {
-    return res.status(400).json({ error: "page and limit must be positive integers" });
+  const pagination = parsePagination(req.query);
+  if (pagination.error) {
+    return res.status(400).json({ error: pagination.error });
   }
 
-  const page = rawPage !== undefined ? parseInt(rawPage, 10) : 1;
-  const requestedLimit = rawLimit !== undefined ? parseInt(rawLimit, 10) : 10;
-  const limit = Math.min(requestedLimit, 50);
-  const skip = (page - 1) * limit;
+  const { page, limit, skip } = pagination;
+  const {
+    sortBy = "createdAt",
+    order = "desc",
+    isPrivate: rawIsPrivate,
+    hasPosts: rawHasPosts,
+    search,
+  } = req.query;
 
   // Validation: sortBy
   const allowedSortBy = ["createdAt", "username", "fullname"];
@@ -54,8 +47,9 @@ async function list(req, res) {
     return res.status(400).json({ error: "order must be asc or desc" });
   }
 
-  // Validation: isPrivate
   const where = {};
+
+  // Validation: isPrivate
   if (rawIsPrivate !== undefined) {
     if (rawIsPrivate === "true") {
       where.isPrivate = true;
@@ -63,6 +57,17 @@ async function list(req, res) {
       where.isPrivate = false;
     } else {
       return res.status(400).json({ error: "isPrivate must be true or false" });
+    }
+  }
+
+  // Validation: hasPosts
+  if (rawHasPosts !== undefined) {
+    if (rawHasPosts === "true") {
+      where.posts = { some: {} };
+    } else if (rawHasPosts === "false") {
+      where.posts = { none: {} };
+    } else {
+      return res.status(400).json({ error: "hasPosts must be true or false" });
     }
   }
 
@@ -84,16 +89,9 @@ async function list(req, res) {
       where,
     });
 
-    const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
-
     return res.status(200).json({
       data,
-      meta: {
-        page,
-        limit,
-        total,
-        totalPages,
-      },
+      meta: buildMeta(page, limit, total),
     });
   } catch (err) {
     console.error(err);
@@ -156,10 +154,76 @@ async function remove(req, res) {
   }
 }
 
+async function getUserPosts(req, res) {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  const pagination = parsePagination(req.query);
+  if (pagination.error) {
+    return res.status(400).json({ error: pagination.error });
+  }
+
+  const { page, limit, skip } = pagination;
+
+  try {
+    const result = await usersService.getUserPosts(id, {
+      skip,
+      take: limit,
+    });
+    if (!result) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    return res.status(200).json({
+      data: result.data,
+      meta: buildMeta(page, limit, result.total),
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
+async function getUserLikedPosts(req, res) {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  const pagination = parsePagination(req.query);
+  if (pagination.error) {
+    return res.status(400).json({ error: pagination.error });
+  }
+
+  const { page, limit, skip } = pagination;
+
+  try {
+    const result = await usersService.getUserLikedPosts(id, {
+      skip,
+      take: limit,
+    });
+    if (!result) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    return res.status(200).json({
+      data: result.data,
+      meta: buildMeta(page, limit, result.total),
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+}
+
 module.exports = {
   create,
   list,
   getOne,
   update,
   remove,
+  getUserPosts,
+  getUserLikedPosts,
 };
